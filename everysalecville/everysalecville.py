@@ -20,8 +20,9 @@ SALES_URL = "https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_2/
 DETAILS_URL = "https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_1/MapServer/72/query"
 IMAGE_URL = "https://gisweb.charlottesville.org/GisViewer/ParcelViewer/Details"
 
-SHELF_PATH = "shelf.db"
-GIS_IMAGE_PATH = pathlib.Path("images")
+BASE_PATH = pathlib.Path(__file__).parent.absolute()
+SHELF_PATH = BASE_PATH.joinpath("shelf.db")
+GIS_IMAGE_PATH = BASE_PATH.joinpath("images")
 
 
 def main(shelf, client, start_date):
@@ -45,7 +46,9 @@ def main(shelf, client, start_date):
         media_ids = []
         photo_image = get_image(parcel_number)
         if photo_image:
-            photo_upload = client.media_upload(filename=f"{parcel_number}.jpg", file=photo_image)
+            photo_upload = client.media_upload(
+                filename=f"{parcel_number}.jpg", file=photo_image
+            )
             media_ids.append(photo_upload.media_id)
         gis_image = GIS_IMAGE_PATH.joinpath(f"{parcel_number}.jpg")
         if gis_image.exists():
@@ -103,7 +106,9 @@ def get_image(parcel_number: str) -> Optional[io.BytesIO]:
 
 
 if __name__ == "__main__":
-    client = twitter_bot_utils.API(screen_name="everysalecville", config_file=os.getenv("TWITTER_CONFIG_PATH"))
+    client = twitter_bot_utils.API(
+        screen_name="everysalecville", config_file=os.getenv("TWITTER_CONFIG_PATH")
+    )
     start_date = datetime.date.today() - datetime.timedelta(days=5)
-    with shelve.open(SHELF_PATH) as shelf:
+    with shelve.open(str(SHELF_PATH)) as shelf:
         main(shelf, client, start_date)

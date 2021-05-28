@@ -57,6 +57,9 @@ if __name__ == "__main__":
 
     for row in details:
         parcel_number = row["ParcelNumber"]
+        if parcel_number == "22B296000":
+            import ipdb; ipdb.set_trace()
+            print(parcel_number)
         download_path = download_directory.joinpath(f"{parcel_number}.jpg")
         if not download_path.exists():
             print(f"Scraping parcel number {parcel_number}")
