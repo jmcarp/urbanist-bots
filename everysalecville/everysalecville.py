@@ -18,6 +18,7 @@ import twitter_bot_utils
 
 SALES_URL = "https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_2/MapServer/3/query"
 DETAILS_URL = "https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_1/MapServer/72/query"
+REAL_ESTATE_URL = "https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_2/MapServer/17/query"
 IMAGE_URL = "https://gisweb.charlottesville.org/GisViewer/ParcelViewer/Details"
 
 BASE_PATH = pathlib.Path(__file__).parent.absolute()
@@ -35,6 +36,23 @@ def main(shelf, client, start_date):
             continue
 
         details = get_details(parcel_number)
+
+        # Skip parcels that have multiple non-zero finished square foot records.
+        price_per_square_foot = None
+        real_estate = get_real_estate(parcel_number)
+        if len(real_estate) > 0:
+            square_feets = [
+                int(each["SquareFootageFinishedLiving"])
+                for each in real_estate
+                if each["SquareFootageFinishedLiving"].isnumeric()
+                and int(each["SquareFootageFinishedLiving"]) > 0
+            ]
+            if len(square_feets) == 1:
+                square_feet = square_feets[0]
+                price_per_square_foot = humanize.intcomma(
+                    round(sale["SaleAmount"] / square_feet)
+                )
+
         address = f"{details['StreetNumber']} {details['StreetName']}"
         if details["Unit"]:
             address = f"{address} Unit {details['Unit']}"
@@ -42,6 +60,8 @@ def main(shelf, client, start_date):
         sale_amount = humanize.intcomma(sale["SaleAmount"])
         assessment = humanize.intcomma(details["Assessment"])
         status = f"{address}, sold on {sale_date} for ${sale_amount}. Zoned {details['Zoning']}, assessed at ${assessment}."
+        if price_per_square_foot:
+            status = f"{status} ${price_per_square_foot} per square foot."
 
         media_ids = []
         photo_image = get_image(parcel_number)
@@ -85,6 +105,18 @@ def get_details(parcel_number: str):
     data = response.json()
     assert len(data["features"]) == 1
     return data["features"][0]["attributes"]
+
+
+def get_real_estate(parcel_number: str) -> List[Dict]:
+    params = {
+        "where": f"ParcelNumber = '{parcel_number}'",
+        "outFields": "*",
+        "f": "json",
+    }
+    response = requests.get(REAL_ESTATE_URL, params=params)
+    response.raise_for_status()
+    data = response.json()
+    return [feature["attributes"] for feature in data["features"]]
 
 
 def get_image(parcel_number: str) -> Optional[io.BytesIO]:
