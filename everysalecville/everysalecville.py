@@ -37,21 +37,13 @@ def main(shelf, client, start_date):
 
         details = get_details(parcel_number)
 
-        # Skip parcels that have multiple non-zero finished square foot records.
-        price_per_square_foot = None
-        real_estate = get_real_estate(parcel_number)
-        if len(real_estate) > 0:
-            square_feets = [
-                int(each["SquareFootageFinishedLiving"])
-                for each in real_estate
-                if each["SquareFootageFinishedLiving"].isnumeric()
-                and int(each["SquareFootageFinishedLiving"]) > 0
-            ]
-            if len(square_feets) == 1:
-                square_feet = square_feets[0]
-                price_per_square_foot = humanize.intcomma(
-                    round(sale["SaleAmount"] / square_feet)
-                )
+        square_feet = get_square_feet(parcel_number)
+        if square_feet:
+            price_per_square_foot = humanize.intcomma(
+                round(sale["SaleAmount"] / square_feet)
+            )
+        else:
+            price_per_square_foot = None
 
         address = f"{details['StreetNumber']} {details['StreetName']}"
         if details["Unit"]:
@@ -117,6 +109,30 @@ def get_real_estate(parcel_number: str) -> List[Dict]:
     response.raise_for_status()
     data = response.json()
     return [feature["attributes"] for feature in data["features"]]
+
+
+def get_square_feet(parcel_number: str) -> Optional[int]:
+    """Calculate total finished square feet.
+
+    Note: some parcels have multiple real estate records with different details. To be
+    safe, skip parcels with ambiguous records.
+    """
+    # Skip parcels that have multiple non-zero finished square foot records.
+    price_per_square_foot = None
+    real_estate = get_real_estate(parcel_number)
+    with_square_feet = [
+        record
+        for record in real_estate
+        if record["SquareFootageFinishedLiving"].isnumeric()
+        and int(record["SquareFootageFinishedLiving"]) > 0
+    ]
+    if len(with_square_feet) == 1:
+        square_feet = int(with_square_feet[0]["SquareFootageFinishedLiving"])
+        if with_square_feet[0]["FinishedBasement"].isnumeric():
+            square_feet += int(with_square_feet[0]["FinishedBasement"])
+        return square_feet
+    else:
+        return None
 
 
 def get_image(parcel_number: str) -> Optional[io.BytesIO]:
