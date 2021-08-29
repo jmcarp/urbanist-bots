@@ -6,7 +6,6 @@ import io
 import os
 import pathlib
 import shelve
-import urllib
 from typing import Dict, List, Optional
 
 import humanize
@@ -14,6 +13,7 @@ import lxml.html
 import requests
 import tweepy
 import twitter_bot_utils
+from PIL import Image
 
 
 SALES_URL = "https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_2/MapServer/3/query"
@@ -147,10 +147,42 @@ def get_image(parcel_number: str) -> Optional[io.BytesIO]:
     urls = page.xpath('//img[contains(@src, "realestate.charlottesville.org")]/@src')
     if urls:
         image_response = requests.get(urls[0])
-        image_response.raise_for_status()
-        return io.BytesIO(image_response.content)
+        if image_response.status_code != 200:
+            return None
+        try:
+            return maybe_compress_image(io.BytesIO(image_response.content))
+        except ImageTooLarge:
+            return None
     else:
         return None
+
+
+MAX_IMAGE_SIZE_BYTES = 5242880
+
+
+class ImageTooLarge(Exception):
+    pass
+
+
+def maybe_compress_image(
+    in_buffer, min_quality: int = 10, max_size: int = MAX_IMAGE_SIZE_BYTES
+):
+    """Lower image quality until it's small enough for Twitter."""
+    in_buffer.seek(0, os.SEEK_END)
+    in_size = in_buffer.tell()
+    in_buffer.seek(0)
+    if in_size <= max_size:
+        return in_buffer
+    image = Image.open(in_buffer)
+    quality = 90
+    while quality >= min_quality:
+        out_buffer = io.BytesIO()
+        image.save(out_buffer, "JPEG", quality=quality)
+        if out_buffer.tell() < max_size:
+            out_buffer.seek(0)
+            return out_buffer
+        quality -= 10
+    raise ImageTooLarge()
 
 
 if __name__ == "__main__":
