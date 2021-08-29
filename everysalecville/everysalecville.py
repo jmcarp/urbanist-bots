@@ -3,6 +3,7 @@
 
 import datetime
 import io
+import logging
 import os
 import pathlib
 import shelve
@@ -15,6 +16,8 @@ import tweepy
 import twitter_bot_utils
 from PIL import Image
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 SALES_URL = "https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_2/MapServer/3/query"
 DETAILS_URL = "https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_1/MapServer/72/query"
@@ -30,9 +33,12 @@ def main(shelf, client, start_date):
     sales = get_sales(start_date)
     for sale in sales:
         parcel_number = sale["ParcelNumber"]
+        logger.info("Processing parcel number %s", parcel_number)
         if parcel_number in shelf:
+            logger.info("Skipping already-processed parcel")
             continue
         if sale["SaleAmount"] == 0:
+            logger.info("Skipping parcel with missing sale price")
             continue
 
         details = get_details(parcel_number)
