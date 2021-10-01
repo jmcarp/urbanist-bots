@@ -42,8 +42,7 @@ def main(shelf, client, start_date):
         last_tweet = None
         group_count = len(sale_group)
         sorted_sales = sorted(sale_group, key=lambda sale: sale["ParcelNumber"])
-        if group_count == 1:
-            continue
+
         for index, sale in enumerate(sorted_sales):
             parcel_number = sale["ParcelNumber"]
             logger.info("Processing parcel number %s", parcel_number)
@@ -79,6 +78,10 @@ def main(shelf, client, start_date):
                 status = f"{status} ${price_per_square_foot} per square foot."
             if group_count > 1:
                 status = f"{status} Parcel {index + 1} of {group_count}."
+            else:
+                previous_sale = get_previous_sale(parcel_number, sale_date)
+                if previous_sale is not None:
+                    status = f"{status} {format_previous_sale(previous_sale)}"
 
             media_ids = []
             photo_image = get_image(parcel_number)
@@ -105,7 +108,7 @@ def main(shelf, client, start_date):
 
 def get_sales(start_date: Optional[datetime.date] = None) -> List[Dict]:
     start_date = start_date or datetime.date.today() - datetime.timedelta(days=1)
-    start_query = start_date.strftime("%Y-%m-%d %H:%M%S")
+    start_query = start_date.strftime("%Y-%m-%d %H:%M:%S")
     params = {
         "where": f"SaleDate >= TIMESTAMP '{start_query}'",
         "outFields": "*",
@@ -117,7 +120,38 @@ def get_sales(start_date: Optional[datetime.date] = None) -> List[Dict]:
     return [each["attributes"] for each in data["features"]]
 
 
-def get_details(parcel_number: str):
+def get_previous_sale(
+    parcel_number: str, sale_date: datetime.datetime
+) -> Optional[Dict]:
+    date_query = sale_date.strftime("%Y-%m-%d %H:%M:%S")
+    params = {
+        "where": " AND ".join(
+            [
+                f"ParcelNumber = '{parcel_number}'",
+                f"SaleDate < TIMESTAMP '{date_query}'",
+                "SaleAmount > 0",
+            ]
+        ),
+        "orderByFields": "SaleDate desc",
+        "outFields": "*",
+        "f": "json",
+    }
+    response = requests.post(SALES_URL, params=params)
+    response.raise_for_status()
+    data = response.json()
+    if len(data["features"]) > 0:
+        return data["features"][0]["attributes"]
+    else:
+        return None
+
+
+def format_previous_sale(sale: Dict) -> str:
+    sale_date = datetime.datetime.fromtimestamp(sale["SaleDate"] / 1000)
+    sale_amount = humanize.intcomma(sale["SaleAmount"])
+    return f"Last sold in {sale_date.year} for ${sale_amount}."
+
+
+def get_details(parcel_number: str) -> Dict:
     params = {
         "where": f"ParcelNumber = '{parcel_number}'",
         "outFields": "*",
@@ -169,8 +203,8 @@ def get_square_feet(parcel_number: str) -> Optional[int]:
 def get_image(parcel_number: str) -> Optional[io.BytesIO]:
     params = {
         "Key": parcel_number,
-        "SearchOptionIndex": 0,
-        "DetailsTabIndex": 0,
+        "SearchOptionIndex": "0",
+        "DetailsTabIndex": "0",
     }
     details_response = requests.get(IMAGE_URL, params=params)
     details_response.raise_for_status()
