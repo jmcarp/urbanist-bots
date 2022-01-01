@@ -73,7 +73,12 @@ def main(shelf, client, start_date):
             sale_date = datetime.datetime.fromtimestamp(sale["SaleDate"] / 1000).date()
             sale_amount = humanize.intcomma(sale["SaleAmount"])
             assessment = humanize.intcomma(details["Assessment"])
-            status = f"{address}, sold on {sale_date} for ${sale_amount}. Zoned {details['Zoning']}, assessed at ${assessment}."
+            sold_detail = (
+                f"sold to {details['OwnerName']}"
+                if is_probable_business(details["OwnerName"])
+                else "sold"
+            )
+            status = f"{address}, {sold_detail} on {sale_date} for ${sale_amount}. Zoned {details['Zoning']}, assessed at ${assessment}."
             if price_per_square_foot:
                 status = f"{status} ${price_per_square_foot} per square foot."
             if group_count > 1:
@@ -198,6 +203,14 @@ def get_square_feet(parcel_number: str) -> Optional[int]:
         return square_feet
     else:
         return None
+
+
+def is_probable_business(owner: str) -> bool:
+    return (
+        owner.endswith(" LLC")
+        or owner.endswith(" INC")
+        or owner.endswith(" CORPORATION")
+    )
 
 
 def get_image(parcel_number: str) -> Optional[io.BytesIO]:
