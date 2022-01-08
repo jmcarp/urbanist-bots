@@ -267,6 +267,6 @@ if __name__ == "__main__":
     client = twitter_bot_utils.API(
         screen_name="everysalecville", config_file=os.getenv("TWITTER_CONFIG_PATH")
     )
-    start_date = datetime.date.today() - datetime.timedelta(days=5)
+    start_date = datetime.date.today() - datetime.timedelta(days=14)
     with shelve.open(str(SHELF_PATH)) as shelf:
         main(shelf, client, start_date)
