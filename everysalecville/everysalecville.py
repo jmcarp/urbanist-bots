@@ -210,6 +210,7 @@ def is_probable_business(owner: str) -> bool:
         owner.endswith(" LLC")
         or owner.endswith(" INC")
         or owner.endswith(" CORPORATION")
+        or owner.endswith(" FOUNDATION")
     )
 
 
