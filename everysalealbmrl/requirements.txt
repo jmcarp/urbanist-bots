@@ -1,0 +1,11 @@
+fuzzywuzzy
+geopandas
+googlemaps
+humanize
+lxml
+numpy
+pandas
+python-dotenv
+pytz
+requests
+tweepy
