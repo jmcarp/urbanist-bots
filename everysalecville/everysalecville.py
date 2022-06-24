@@ -8,8 +8,10 @@ import logging
 import os
 import pathlib
 import shelve
+import time
 from typing import Dict, List, Optional
 
+from google.cloud import monitoring_v3
 import humanize
 import lxml.html
 import requests
@@ -30,8 +32,9 @@ SHELF_PATH = BASE_PATH.joinpath("shelf.db")
 GIS_IMAGE_PATH = BASE_PATH.joinpath("images")
 
 
-def main(shelf, client, start_date):
+def main(shelf, client, start_date) -> int:
     sales = get_sales(start_date)
+    post_count = 0
 
     # Group sales by book page, then post each group as a thread
     sale_groups = collections.defaultdict(list)
@@ -109,6 +112,8 @@ def main(shelf, client, start_date):
             last_tweet = status.id
             shelf[parcel_number] = status.id
             shelf.sync()
+            post_count += 1
+    return post_count
 
 
 def get_sales(start_date: Optional[datetime.date] = None) -> List[Dict]:
@@ -264,10 +269,52 @@ def maybe_compress_image(
     raise ImageTooLarge()
 
 
+def send_metric(client, metric, labels, value, project_id="cvilledata"):
+    project_name = f"projects/{project_id}"
+
+    series = monitoring_v3.TimeSeries()
+    series.metric.type = f"custom.googleapis.com/{metric}"
+    series.metric.labels.update(labels)
+
+    now = time.time()
+    seconds = int(now)
+    nanos = int((now - seconds) * 10 ** 9)
+
+    interval = monitoring_v3.TimeInterval(
+        {"end_time": {"seconds": seconds, "nanos": nanos}}
+    )
+    point = monitoring_v3.Point({"interval": interval, "value": value})
+    series.points = [point]
+
+    client.create_time_series(name=project_name, time_series=[series])
+
+
 if __name__ == "__main__":
-    client = twitter_bot_utils.API(
+    twitter_client = twitter_bot_utils.API(
         screen_name="everysalecville", config_file=os.getenv("TWITTER_CONFIG_PATH")
     )
+    metrics_client = monitoring_v3.MetricServiceClient()
     start_date = datetime.date.today() - datetime.timedelta(days=14)
-    with shelve.open(str(SHELF_PATH)) as shelf:
-        main(shelf, client, start_date)
+    try:
+        with shelve.open(str(SHELF_PATH)) as shelf:
+            post_count = main(shelf, twitter_client, start_date)
+        send_metric(
+            metrics_client,
+            "bot_status",
+            {"bot": "everysalecville", "status": "success"},
+            {"int64_value": 1},
+        )
+        send_metric(
+            metrics_client,
+            "bot_post_count",
+            {"bot": "everysalecville"},
+            {"int64_value": post_count},
+        )
+    except Exception as exc:
+        logger.error(exc)
+        send_metric(
+            metrics_client,
+            "bot_status",
+            {"bot": "everysalecville", "status": "error"},
+            {"int64_value": 1},
+        )
