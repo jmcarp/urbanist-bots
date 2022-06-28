@@ -48,16 +48,22 @@ def main(shelf, client, start_date) -> int:
 
         for index, sale in enumerate(sorted_sales):
             parcel_number = sale["ParcelNumber"]
+            book_page = sale["BookPage"]
+            key = f"{parcel_number}::{book_page}"
             logger.info("Processing parcel number %s", parcel_number)
-            if parcel_number in shelf:
+            if key in shelf:
                 logger.info("Skipping already-processed parcel")
-                last_tweet = shelf[parcel_number]
+                last_tweet = shelf[key]
                 continue
             if sale["SaleAmount"] == 0:
                 logger.info("Skipping parcel with missing sale price")
                 continue
 
-            details = get_details(parcel_number)
+            detailses = get_details(parcel_number)
+            if len(detailses) != 1:
+                logger.warn(f"Expected 1 detail record; got {len(detailses)}")
+                continue
+            details = detailses[0]
 
             # Get price per square foot for single-property transactions. Otherwise skip,
             # since showing price per square foot over multiple properties could be
@@ -110,7 +116,7 @@ def main(shelf, client, start_date) -> int:
                 media_ids=media_ids,
             )
             last_tweet = status.id
-            shelf[parcel_number] = status.id
+            shelf[key] = status.id
             shelf.sync()
             post_count += 1
     return post_count
@@ -170,8 +176,7 @@ def get_details(parcel_number: str) -> Dict:
     response = requests.get(DETAILS_URL, params=params)
     response.raise_for_status()
     data = response.json()
-    assert len(data["features"]) == 1
-    return data["features"][0]["attributes"]
+    return [feature["attributes"] for feature in data["features"]]
 
 
 def get_real_estate(parcel_number: str) -> List[Dict]:
@@ -198,7 +203,8 @@ def get_square_feet(parcel_number: str) -> Optional[int]:
     with_square_feet = [
         record
         for record in real_estate
-        if record["SquareFootageFinishedLiving"].isnumeric()
+        if record["SquareFootageFinishedLiving"]
+        and record["SquareFootageFinishedLiving"].isnumeric()
         and int(record["SquareFootageFinishedLiving"]) > 0
     ]
     if len(with_square_feet) == 1:
@@ -278,7 +284,7 @@ def send_metric(client, metric, labels, value, project_id="cvilledata"):
 
     now = time.time()
     seconds = int(now)
-    nanos = int((now - seconds) * 10 ** 9)
+    nanos = int((now - seconds) * 10**9)
 
     interval = monitoring_v3.TimeInterval(
         {"end_time": {"seconds": seconds, "nanos": nanos}}
