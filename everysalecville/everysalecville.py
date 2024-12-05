@@ -9,14 +9,15 @@ import os
 import pathlib
 import shelve
 import time
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional, TypeAlias
 
-from google.cloud import monitoring_v3
+import atproto
 import humanize
 import lxml.html
 import requests
-import tweepy
-import twitter_bot_utils
+from dotenv import load_dotenv
+from google.cloud import monitoring_v3
 from PIL import Image
 
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +32,25 @@ BASE_PATH = pathlib.Path(__file__).parent.absolute()
 SHELF_PATH = BASE_PATH.joinpath("shelf.db")
 GIS_IMAGE_PATH = BASE_PATH.joinpath("images")
 
+CreateRecordResponse: TypeAlias = atproto.models.app.bsky.feed.post.CreateRecordResponse
+
+
+@dataclass
+class Post:
+    """Model a post that describes a transaction.
+
+    We track the progress of the scraper using a shelve.Shelf that maps parcel
+    numbers and book numbers to post details. This format must tell us whether
+    or not a given transaction has already been posted, and if so, the details
+    of the post and thread (if part of a multi-parcel transaction).
+    """
+
+    parcel_number: str
+    book_page: str
+    post: CreateRecordResponse
+    thread_root: Optional[CreateRecordResponse]
+    thread_parent: Optional[CreateRecordResponse]
+
 
 def main(shelf, client, start_date) -> int:
     sales = get_sales(start_date)
@@ -42,18 +62,19 @@ def main(shelf, client, start_date) -> int:
         sale_groups[sale["BookPage"]].append(sale)
 
     for sale_group in sale_groups.values():
-        last_tweet = None
         group_count = len(sale_group)
         sorted_sales = sorted(sale_group, key=lambda sale: sale["ParcelNumber"])
+        thread_root, thread_parent = None, None
 
         for index, sale in enumerate(sorted_sales):
             parcel_number = sale["ParcelNumber"]
             book_page = sale["BookPage"]
             key = f"{parcel_number}::{book_page}"
-            logger.info("Processing parcel number %s", parcel_number)
+            logger.info("Processing parcel %s::%s", parcel_number, book_page)
             if key in shelf:
                 logger.info("Skipping already-processed parcel")
-                last_tweet = shelf[key]
+                thread_parent = shelf[key].post
+                thread_root = shelf[key].thread_root
                 continue
             if sale["SaleAmount"] == 0:
                 logger.info("Skipping parcel with missing sale price")
@@ -97,26 +118,41 @@ def main(shelf, client, start_date) -> int:
                 if previous_sale is not None:
                     status = f"{status} {format_previous_sale(previous_sale)}"
 
-            media_ids = []
-            photo_image = get_image(parcel_number)
+            images = []
+            photo_image = get_gis_photo(parcel_number)
             if photo_image:
-                photo_upload = client.media_upload(
-                    filename=f"{parcel_number}.jpg", file=photo_image
-                )
-                media_ids.append(photo_upload.media_id)
-            gis_image = GIS_IMAGE_PATH.joinpath(f"{parcel_number}.jpg")
-            if gis_image.exists():
-                gis_upload = client.media_upload(str(gis_image))
-                media_ids.append(gis_upload.media_id)
+                images.append(photo_image.read())
+            # Get annotated map image from GIS if available on disk. This is a
+            # gratuitous process that we could replace with the google maps
+            # api, but the official GIS images look cool.
+            gis_image_path = GIS_IMAGE_PATH.joinpath(f"{parcel_number}.jpg")
+            if gis_image_path.exists():
+                with gis_image_path.open("rb") as fp:
+                    gis_image = fp.read()
+                images.append(gis_image)
 
-            status = client.update_status(
-                status=status,
-                in_reply_to_status_id=last_tweet,
-                auto_populate_reply_metadata=True,
-                media_ids=media_ids,
+            if thread_parent is not None:
+                reply_to = atproto.models.AppBskyFeedPost.ReplyRef(
+                    parent=thread_parent, root=thread_root
+                )
+            else:
+                reply_to = None
+            resp = client.send_images(
+                text=status,
+                reply_to=reply_to,
+                images=images,
             )
-            last_tweet = status.id
-            shelf[key] = status.id
+
+            thread_root = thread_root or resp
+            shelf[key] = Post(
+                parcel_number=parcel_number,
+                book_page=book_page,
+                post=resp,
+                thread_parent=thread_parent,
+                thread_root=thread_root,
+            )
+            thread_parent = resp
+
             shelf.sync()
             post_count += 1
     return post_count
@@ -136,9 +172,7 @@ def get_sales(start_date: Optional[datetime.date] = None) -> List[Dict]:
     return [each["attributes"] for each in data["features"]]
 
 
-def get_previous_sale(
-    parcel_number: str, sale_date: datetime.datetime
-) -> Optional[Dict]:
+def get_previous_sale(parcel_number: str, sale_date: datetime.date) -> Optional[Dict]:
     date_query = sale_date.strftime("%Y-%m-%d %H:%M:%S")
     params = {
         "where": " AND ".join(
@@ -167,25 +201,13 @@ def format_previous_sale(sale: Dict) -> str:
     return f"Last sold in {sale_date.year} for ${sale_amount}."
 
 
-def get_details(parcel_number: str) -> Dict:
+def get_details(parcel_number: str) -> List[Dict]:
     params = {
         "where": f"ParcelNumber = '{parcel_number}'",
         "outFields": "*",
         "f": "json",
     }
     response = requests.get(DETAILS_URL, params=params)
-    response.raise_for_status()
-    data = response.json()
-    return [feature["attributes"] for feature in data["features"]]
-
-
-def get_real_estate(parcel_number: str) -> List[Dict]:
-    params = {
-        "where": f"ParcelNumber = '{parcel_number}'",
-        "outFields": "*",
-        "f": "json",
-    }
-    response = requests.get(REAL_ESTATE_URL, params=params)
     response.raise_for_status()
     data = response.json()
     return [feature["attributes"] for feature in data["features"]]
@@ -216,7 +238,23 @@ def get_square_feet(parcel_number: str) -> Optional[int]:
         return None
 
 
+def get_real_estate(parcel_number: str) -> List[Dict]:
+    params = {
+        "where": f"ParcelNumber = '{parcel_number}'",
+        "outFields": "*",
+        "f": "json",
+    }
+    response = requests.get(REAL_ESTATE_URL, params=params)
+    response.raise_for_status()
+    data = response.json()
+    return [feature["attributes"] for feature in data["features"]]
+
+
 def is_probable_business(owner: str) -> bool:
+    """Guess whether a parcel is a business based on its owner. We don't want
+    to publish individual names, even though they're a matter of public record,
+    but business names are fair game.
+    """
     return (
         owner.endswith(" LLC")
         or owner.endswith(" INC")
@@ -225,7 +263,8 @@ def is_probable_business(owner: str) -> bool:
     )
 
 
-def get_image(parcel_number: str) -> Optional[io.BytesIO]:
+def get_gis_photo(parcel_number: str) -> Optional[io.BytesIO]:
+    """Get parcel image from GIS, compressing if necessary."""
     params = {
         "Key": parcel_number,
         "SearchOptionIndex": "0",
@@ -236,7 +275,7 @@ def get_image(parcel_number: str) -> Optional[io.BytesIO]:
     page = lxml.html.fromstring(details_response.content)
     urls = page.xpath('//img[contains(@src, "realestate.charlottesville.org")]/@src')
     if urls:
-        image_response = requests.get(urls[0])
+        image_response = requests.get(urls[0])  # type: ignore
         if image_response.status_code != 200:
             return None
         try:
@@ -247,7 +286,7 @@ def get_image(parcel_number: str) -> Optional[io.BytesIO]:
         return None
 
 
-MAX_IMAGE_SIZE_BYTES = 5242880
+MAX_IMAGE_SIZE_BYTES = 2**20
 
 
 class ImageTooLarge(Exception):
@@ -276,6 +315,8 @@ def maybe_compress_image(
 
 
 def send_metric(client, metric, labels, value, project_id="cvilledata"):
+    if not os.getenv("SEND_CLOUD_METRICS"):
+        return
     project_name = f"projects/{project_id}"
 
     series = monitoring_v3.TimeSeries()
@@ -296,14 +337,14 @@ def send_metric(client, metric, labels, value, project_id="cvilledata"):
 
 
 if __name__ == "__main__":
-    twitter_client = twitter_bot_utils.API(
-        screen_name="everysalecville", config_file=os.getenv("TWITTER_CONFIG_PATH")
-    )
+    load_dotenv()
+    bsky_client = atproto.Client()
+    bsky_client.login("everysalecville.bsky.social", os.getenv("BLUESKY_PASSWORD"))
     metrics_client = monitoring_v3.MetricServiceClient()
     start_date = datetime.date.today() - datetime.timedelta(days=14)
     try:
         with shelve.open(str(SHELF_PATH)) as shelf:
-            post_count = main(shelf, twitter_client, start_date)
+            post_count = main(shelf, bsky_client, start_date)
         send_metric(
             metrics_client,
             "bot_status",
