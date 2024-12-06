@@ -10,7 +10,7 @@ import pathlib
 import shelve
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, TypeAlias
+from typing import Dict, List, Optional, Tuple, TypeAlias
 
 import atproto
 import humanize
@@ -114,9 +114,11 @@ def main(shelf, client, start_date) -> int:
             if group_count > 1:
                 status = f"{status} Parcel {index + 1} of {group_count}."
             else:
-                previous_sale = get_previous_sale(parcel_number, sale_date)
+                previous_sale, previous_parcel_count = get_previous_sale(
+                    parcel_number, sale_date
+                )
                 if previous_sale is not None:
-                    status = f"{status} {format_previous_sale(previous_sale)}"
+                    status = f"{status} {format_previous_sale(previous_sale, previous_parcel_count)}"
 
             images = []
             photo_image = get_gis_photo(parcel_number)
@@ -172,7 +174,9 @@ def get_sales(start_date: Optional[datetime.date] = None) -> List[Dict]:
     return [each["attributes"] for each in data["features"]]
 
 
-def get_previous_sale(parcel_number: str, sale_date: datetime.date) -> Optional[Dict]:
+def get_previous_sale(
+    parcel_number: str, sale_date: datetime.date
+) -> Tuple[Optional[Dict], int]:
     date_query = sale_date.strftime("%Y-%m-%d %H:%M:%S")
     params = {
         "where": " AND ".join(
@@ -190,21 +194,11 @@ def get_previous_sale(parcel_number: str, sale_date: datetime.date) -> Optional[
     response.raise_for_status()
     data = response.json()
     if len(data["features"]) > 0:
-        # Some transactions include multiple parcels. If the previous sale
-        # included multiple parcels, the sale amount isn't comparable to the
-        # current sale price, so don't show it.
         feature = data["features"][0]
         sales_by_page = get_sales_by_page(feature["attributes"]["BookPage"])
-        if len(sales_by_page) == 1:
-            return data["features"][0]["attributes"]
-        else:
-            logger.info(
-                "Skipping previous sale with book page %s, which included multiple parcels",
-                feature["attributes"]["BookPage"],
-            )
-            return None
+        return feature["attributes"], len(sales_by_page)
     else:
-        return None
+        return None, 0
 
 
 def get_sales_by_page(book_page: str) -> List[Dict]:
@@ -219,10 +213,13 @@ def get_sales_by_page(book_page: str) -> List[Dict]:
     return [feature["attributes"] for feature in data["features"]]
 
 
-def format_previous_sale(sale: Dict) -> str:
+def format_previous_sale(sale: Dict, parcel_count: int) -> str:
     sale_date = datetime.datetime.fromtimestamp(sale["SaleDate"] / 1000)
     sale_amount = humanize.intcomma(sale["SaleAmount"])
-    return f"Last sold in {sale_date.year} for ${sale_amount}."
+    out = f"Last sold in {sale_date.year} for ${sale_amount}"
+    if parcel_count > 1:
+        out += f" ({parcel_count} parcels)"
+    return out + "."
 
 
 def get_details(parcel_number: str) -> List[Dict]:
