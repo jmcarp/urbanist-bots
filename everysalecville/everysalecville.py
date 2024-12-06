@@ -190,9 +190,33 @@ def get_previous_sale(parcel_number: str, sale_date: datetime.date) -> Optional[
     response.raise_for_status()
     data = response.json()
     if len(data["features"]) > 0:
-        return data["features"][0]["attributes"]
+        # Some transactions include multiple parcels. If the previous sale
+        # included multiple parcels, the sale amount isn't comparable to the
+        # current sale price, so don't show it.
+        feature = data["features"][0]
+        sales_by_page = get_sales_by_page(feature["attributes"]["BookPage"])
+        if len(sales_by_page) == 1:
+            return data["features"][0]["attributes"]
+        else:
+            logger.info(
+                "Skipping previous sale with book page %s, which included multiple parcels",
+                feature["attributes"]["BookPage"],
+            )
+            return None
     else:
         return None
+
+
+def get_sales_by_page(book_page: str) -> List[Dict]:
+    params = {
+        "where": f"BookPage = '{book_page}'",
+        "outFields": "*",
+        "f": "json",
+    }
+    response = requests.post(SALES_URL, params=params)
+    response.raise_for_status()
+    data = response.json()
+    return [feature["attributes"] for feature in data["features"]]
 
 
 def format_previous_sale(sale: Dict) -> str:
