@@ -135,7 +135,8 @@ def main(shelf, client, start_date) -> int:
 
             if thread_parent is not None:
                 reply_to = atproto.models.AppBskyFeedPost.ReplyRef(
-                    parent=thread_parent, root=thread_root
+                    parent=atproto.models.create_strong_ref(thread_parent),
+                    root=atproto.models.create_strong_ref(thread_root),
                 )
             else:
                 reply_to = None
@@ -278,9 +279,19 @@ def is_probable_business(owner: str) -> bool:
     """
     return (
         owner.endswith(" LLC")
+        or owner.endswith(" LTD")
         or owner.endswith(" INC")
         or owner.endswith(" CORPORATION")
         or owner.endswith(" FOUNDATION")
+        or owner
+        in {
+            "CITY OF CHARLOTTESVILLE",
+            "CITY OF CHARLOTTESVILLE & COUNTY OF ALBEMARLE",
+            "COUNTY OF ALBEMARLE",
+            "THE RECTOR & VISITORS OF THE UNIVERSITY OF VIRGINIA",
+            "CHARLOTTESVILLE REDEVELOPMENT & HOUSING AUTHORITY",
+            "VELIKY, LC",
+        }
     )
 
 
