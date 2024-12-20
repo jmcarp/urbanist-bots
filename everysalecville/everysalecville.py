@@ -120,10 +120,11 @@ def main(shelf, client, start_date) -> int:
                 if previous_sale is not None:
                     status = f"{status} {format_previous_sale(previous_sale, previous_parcel_count)}"
 
-            images = []
+            images, image_alts = [], []
             photo_image = get_gis_photo(parcel_number)
             if photo_image:
                 images.append(photo_image.read())
+                image_alts.append(f"Photo of {address} from GIS database.")
             # Get annotated map image from GIS if available on disk. This is a
             # gratuitous process that we could replace with the google maps
             # api, but the official GIS images look cool.
@@ -132,6 +133,7 @@ def main(shelf, client, start_date) -> int:
                 with gis_image_path.open("rb") as fp:
                     gis_image = fp.read()
                 images.append(gis_image)
+                image_alts.append(f"Map view of {address} from GIS database.")
 
             if thread_parent is not None:
                 reply_to = atproto.models.AppBskyFeedPost.ReplyRef(
@@ -144,6 +146,7 @@ def main(shelf, client, start_date) -> int:
                 text=status,
                 reply_to=reply_to,
                 images=images,
+                image_alts=image_alts,
             )
 
             thread_root = thread_root or resp
