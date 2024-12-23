@@ -1,9 +1,31 @@
 #!/usr/bin/env python
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "atproto",
+#     "httpx",
+#     "lxml",
+#     "python-dotenv",
+# ]
+# ///
+
+"""
+Collect Charlottesville city building permits and post summaries to bluesky.
+
+TODO: ask city staff to drop the US-only allowlist so that we don't have to use
+a proxy to access the portal.
+
+TODO: ask city staff to send permit data to the city data portal. This might
+allow us to replace some or all of the current html parsing logic, although the
+deprecated data portal resource is missing a number of interesting fields:
+https://opendata.charlottesville.org/datasets/a05d31b96c26406788942aabd7b7e581_33/explore.
+"""
 
 import datetime
 import logging
 import os
 import pathlib
+import random
 import shelve
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
@@ -16,6 +38,9 @@ import lxml.html
 LOGIN_URL = "https://permits.charlottesville.gov/portal"
 SEARCH_URL = "https://permits.charlottesville.gov/portal/SearchByNumber/Search"
 PERMIT_URL = "https://permits.charlottesville.gov/portal/PermitInfo/Index"
+
+# The permit portal requires a user-agent to be set. It seems to accept any
+# value.
 HEADERS = {"User-Agent": "everypermitcville.bsky.social"}
 
 BASE_PATH = pathlib.Path(__file__).parent.absolute()
@@ -24,7 +49,9 @@ SHELF_PATH = BASE_PATH.joinpath("shelf.db")
 LOOKBACK_DAYS = 7
 MAX_POST_LENGTH = 300
 MAX_MAX_DETAILS = 5
+MAX_DETAILS_LENGTH = 50
 
+BLUESKY_USERNAME = "everypermitcville.bsky.social"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,13 +63,41 @@ class Post:
     project_number: str
 
 
-def login(client: httpx.Client):
+def list_proxies() -> List[Dict]:
+    resp = httpx.get("https://www.sslproxies.org")
+    resp.raise_for_status()
+    doc = lxml.html.fromstring(resp.content)
+
+    rows = doc.xpath("//*[@id='list']//tr")
+    headers = rows[0].xpath("./th/text()")
+    proxies = [dict(zip(headers, row.xpath("./td/text()"))) for row in rows[1:]]
+
+    return [proxy for proxy in proxies if proxy["Code"] in {"US", "CA"}]
+
+
+def choose_proxy(proxies: List[Dict], check_func) -> str:
+    """Choose a working proxy.
+
+    Free proxy services are unreliable, so check them using a user-supplied
+    function. Return the first proxy that passes the check.
+    """
+    for proxy in proxies:
+        proxy_addr = f"http://{proxy['IP Address']}:{proxy['Port']}"
+        logger.info(f"Checking proxy {proxy_addr}")
+        try:
+            check_func(httpx.Client(proxy=proxy_addr, timeout=30))
+            return proxy_addr
+        except:
+            logger.info("\tProxy failed")
+
+
+def login(client: httpx.Client, username: str, password: str) -> None:
     resp = client.post(
         LOGIN_URL,
         headers=HEADERS,
         data={
-            "LoginName": os.getenv("PERMIT_USERNAME"),
-            "Password": os.getenv("PERMIT_PASSWORD"),
+            "LoginName": username,
+            "Password": password,
         },
     )
     assert (
@@ -173,6 +228,11 @@ def format_message(
 
     if max_details:
         detail_keys = list(permit_details.keys())[:max_details]
+        detail_items = []
+        for key in detail_keys:
+            detail_value = permit_details[key]
+            if len(detail_value) > MAX_DETAILS_LENGTH:
+                detail_value = detail_value[:MAX_DETAILS_LENGTH] + "..."
         detail_items = [f"{key}: {permit_details[key]}" for key in detail_keys]
         if len(permit_details) > len(detail_keys):
             detail_items.append("...")
@@ -187,11 +247,18 @@ def format_message(
 if __name__ == "__main__":
     dotenv.load_dotenv()
 
-    http_client = httpx.Client(timeout=15)
-    login(http_client)
+    # The permit portal only accepts requests from US addresses, and appears to
+    # block VPS services like the one that hosts this application. Route
+    # requests through a US-based proxy.
+    def check_proxy(client: httpx.Client) -> None:
+        login(client, os.getenv("PERMIT_USERNAME"), os.getenv("PERMIT_PASSWORD"))
+
+    proxy_addr = choose_proxy(list_proxies(), check_proxy)
+    http_client = httpx.Client(timeout=30, proxy=proxy_addr)
+    login(http_client, os.getenv("PERMIT_USERNAME"), os.getenv("PERMIT_PASSWORD"))
 
     bsky_client = atproto.Client()
-    bsky_client.login("everypermitcville.bsky.social", os.getenv("BLUESKY_PASSWORD"))
+    bsky_client.login(BLUESKY_USERNAME, os.getenv("BLUESKY_PASSWORD"))
 
     with shelve.open(str(SHELF_PATH)) as shelf:
         main(http_client, bsky_client, shelf)
