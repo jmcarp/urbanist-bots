@@ -4,6 +4,7 @@
 import collections
 import datetime
 import io
+import json
 import logging
 import os
 import pathlib
@@ -13,9 +14,11 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, TypeAlias
 
 import atproto
+import geopandas as gpd
 import humanize
 import lxml.html
 import requests
+import shapely
 from dotenv import load_dotenv
 from google.cloud import monitoring_v3
 from PIL import Image
@@ -52,7 +55,54 @@ class Post:
     thread_parent: Optional[CreateRecordResponse]
 
 
-def main(shelf, client, start_date) -> int:
+class OverlayClassifier:
+    """Load overlay layers and categorize parcel shapes against them.
+
+    To fetch layers, run `make history`.
+
+    Note: using this class throws a `UserWarning` on calculating areas, but
+    since we only care about relative areas to calculate overlap, we can ignore
+    these warnings for now.
+    """
+
+    def __init__(self):
+        self.adc_district_df = gpd.read_file(
+            str(BASE_PATH.joinpath("adc-districts.geojson"))
+        )
+        self.adc_district_contributing_df = gpd.read_file(
+            str(BASE_PATH.joinpath("adc-districts-contributing-structure.geojson"))
+        )
+        self.protected_property_df = gpd.read_file(
+            str(BASE_PATH.joinpath("individually-protected-property.geojson"))
+        )
+
+    def adc_district(self, shape: shapely.Geometry) -> Optional[str]:
+        gdf = self.adc_district_df.copy()
+        gdf["overlap"] = gdf.intersection(shape).area / shape.area
+        by_overlap = gdf[gdf.overlap > 0].sort_values(by="overlap", ascending=False)
+        if not by_overlap.empty:
+            return by_overlap.iloc[0].NAME
+        return None
+
+    def is_adc_contributing(self, shape) -> bool:
+        gdf = self.adc_district_contributing_df.copy()
+        gdf["overlap"] = gdf.intersection(shape).area / shape.area
+        by_overlap = gdf[gdf.overlap > 0].sort_values(by="overlap", ascending=False)
+        return not by_overlap.empty
+
+    def is_protected(self, shape):
+        gdf = self.protected_property_df.copy()
+        gdf["overlap"] = gdf.intersection(shape).area / shape.area
+        by_overlap = gdf[gdf.overlap > 0].sort_values(by="overlap", ascending=False)
+        return not by_overlap.empty
+
+
+def main(
+    shelf: shelve.Shelf,
+    client: atproto.Client,
+    overlay_classifier: OverlayClassifier,
+    start_date: datetime.date,
+) -> int:
     sales = get_sales(start_date)
     post_count = 0
 
@@ -80,45 +130,12 @@ def main(shelf, client, start_date) -> int:
                 logger.info("Skipping parcel with missing sale price")
                 continue
 
-            detailses = get_details(parcel_number)
-            if len(detailses) != 1:
-                logger.warn(f"Expected 1 detail record; got {len(detailses)}")
-                continue
-            details = detailses[0]
-
-            # Get price per square foot for single-property transactions. Otherwise skip,
-            # since showing price per square foot over multiple properties could be
-            # confusing.
-            price_per_square_foot = None
-            if group_count == 1:
-                square_feet = get_square_feet(parcel_number)
-                if square_feet:
-                    price_per_square_foot = humanize.intcomma(
-                        round(sale["SaleAmount"] / square_feet)
-                    )
-
-            address = f"{details['StreetNumber']} {details['StreetName']}"
-            if details["Unit"]:
-                address = f"{address} Unit {details['Unit']}"
-            sale_date = datetime.datetime.fromtimestamp(sale["SaleDate"] / 1000).date()
-            sale_amount = humanize.intcomma(sale["SaleAmount"])
-            assessment = humanize.intcomma(details["Assessment"])
-            sold_detail = (
-                f"sold to {details['OwnerName']}"
-                if is_probable_business(details["OwnerName"])
-                else "sold"
-            )
-            status = f"{address}, {sold_detail} on {sale_date} for ${sale_amount}. Zoned {details['Zoning']}, assessed at ${assessment}."
-            if price_per_square_foot:
-                status = f"{status} ${price_per_square_foot} per square foot."
-            if group_count > 1:
-                status = f"{status} Parcel {index + 1} of {group_count}."
-            else:
-                previous_sale, previous_parcel_count = get_previous_sale(
-                    parcel_number, sale_date
+            try:
+                status, address = get_status(
+                    sale, group_count, index, overlay_classifier
                 )
-                if previous_sale is not None:
-                    status = f"{status} {format_previous_sale(previous_sale, previous_parcel_count)}"
+            except Exception as exc:
+                logger.warn("Error getting status: {exc}")
 
             images, image_alts = [], []
             photo_image = get_gis_photo(parcel_number)
@@ -164,6 +181,66 @@ def main(shelf, client, start_date) -> int:
     return post_count
 
 
+def get_status(
+    sale: Dict, group_count: int, index: int, overlay_classifier: OverlayClassifier
+) -> Tuple[str, str]:
+    parcel_number = sale["ParcelNumber"]
+    detailses = get_details(parcel_number)
+    assert len(detailses) == 1, f"Expected 1 detail record; got {len(detailses)}"
+
+    details = detailses[0]
+    properties = details["properties"]
+    shape = shapely.from_geojson(json.dumps(details))
+
+    # Get price per square foot for single-property transactions. Otherwise skip,
+    # since showing price per square foot over multiple properties could be
+    # confusing.
+    price_per_square_foot = None
+    if group_count == 1:
+        square_feet = get_square_feet(parcel_number)
+        if square_feet:
+            price_per_square_foot = humanize.intcomma(
+                round(sale["SaleAmount"] / square_feet)
+            )
+
+    address = f"{properties['StreetNumber']} {properties['StreetName']}"
+    if properties["Unit"]:
+        address = f"{address} Unit {properties['Unit']}"
+    sale_date = datetime.datetime.fromtimestamp(sale["SaleDate"] / 1000).date()
+    sale_amount = humanize.intcomma(sale["SaleAmount"])
+    assessment = humanize.intcomma(properties["Assessment"])
+    sold_detail = (
+        f"sold to {properties['OwnerName']}"
+        if is_probable_business(properties["OwnerName"])
+        else "sold"
+    )
+    status = f"{address}, {sold_detail} on {sale_date} for ${sale_amount}. Zoned {properties['Zoning']}, assessed at ${assessment}."
+    if price_per_square_foot:
+        status = f"{status} ${price_per_square_foot} per square foot."
+    if group_count > 1:
+        status = f"{status} Parcel {index + 1} of {group_count}."
+    else:
+        previous_sale, previous_parcel_count = get_previous_sale(
+            parcel_number, sale_date
+        )
+        if previous_sale is not None:
+            status = (
+                f"{status} {format_previous_sale(previous_sale, previous_parcel_count)}"
+            )
+
+    # Describe historic districts if applicable.
+    adc_district = overlay_classifier.adc_district(shape)
+    if adc_district is not None:
+        adc_status = adc_district.replace("ADC District", "").strip() + " ADC"
+        if overlay_classifier.is_adc_contributing(shape):
+            adc_status += "; contributing structure"
+        status = f"{status} {adc_status}."
+    if overlay_classifier.is_protected(shape):
+        status = f"{status} IPP."
+
+    return status, address
+
+
 def get_sales(start_date: Optional[datetime.date] = None) -> List[Dict]:
     start_date = start_date or datetime.date.today() - datetime.timedelta(days=1)
     start_query = start_date.strftime("%Y-%m-%d %H:%M:%S")
@@ -198,9 +275,12 @@ def get_previous_sale(
     response.raise_for_status()
     data = response.json()
     if len(data["features"]) > 0:
-        feature = data["features"][0]
-        sales_by_page = get_sales_by_page(feature["attributes"]["BookPage"])
-        return feature["attributes"], len(sales_by_page)
+        attributes = data["features"][0]["attributes"]
+        # Skip if nil BookPage.
+        if attributes["BookPage"] == "0:0":
+            return None, 0
+        sales_by_page = get_sales_by_page(attributes["BookPage"])
+        return attributes, len(sales_by_page)
     else:
         return None, 0
 
@@ -230,12 +310,12 @@ def get_details(parcel_number: str) -> List[Dict]:
     params = {
         "where": f"ParcelNumber = '{parcel_number}'",
         "outFields": "*",
-        "f": "json",
+        "f": "geojson",
     }
     response = requests.get(DETAILS_URL, params=params)
     response.raise_for_status()
     data = response.json()
-    return [feature["attributes"] for feature in data["features"]]
+    return data["features"]
 
 
 def get_square_feet(parcel_number: str) -> Optional[int]:
@@ -375,11 +455,13 @@ if __name__ == "__main__":
     load_dotenv()
     bsky_client = atproto.Client()
     bsky_client.login("everysalecville.bsky.social", os.getenv("BLUESKY_PASSWORD"))
+    overlay_classifier = OverlayClassifier()
     metrics_client = monitoring_v3.MetricServiceClient()
     start_date = datetime.date.today() - datetime.timedelta(days=14)
+
     try:
         with shelve.open(str(SHELF_PATH)) as shelf:
-            post_count = main(shelf, bsky_client, start_date)
+            post_count = main(shelf, bsky_client, overlay_classifier, start_date)
         send_metric(
             metrics_client,
             "bot_status",
