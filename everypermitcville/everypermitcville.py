@@ -51,7 +51,7 @@ MAX_POST_LENGTH = 300
 MAX_MAX_DETAILS = 5
 MAX_DETAILS_LENGTH = 50
 
-BLUESKY_USERNAME = "everypermitcville.bsky.social"
+BLUESKY_USERNAME = "everypermit.cvilledata.org"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -226,14 +226,14 @@ def format_message(
         f"{project_number}: {project_type} @ {address}",
     ]
 
-    if max_details:
+    if max_details > 0:
         detail_keys = list(permit_details.keys())[:max_details]
         detail_items = []
         for key in detail_keys:
             detail_value = permit_details[key]
             if len(detail_value) > MAX_DETAILS_LENGTH:
                 detail_value = detail_value[:MAX_DETAILS_LENGTH] + "..."
-        detail_items = [f"{key}: {permit_details[key]}" for key in detail_keys]
+            detail_items.append(f"{key}: {detail_value}")
         if len(permit_details) > len(detail_keys):
             detail_items.append("...")
         detail_message = "\n".join(detail_items)
