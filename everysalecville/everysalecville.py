@@ -1,5 +1,18 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "atproto",
+#     "geopandas",
+#     "google-cloud-monitoring",
+#     "httpx",
+#     "humanize",
+#     "lxml",
+#     "pillow",
+#     "python-dotenv",
+#     "shapely",
+# ]
+# ///
 
 import collections
 import datetime
@@ -17,7 +30,7 @@ import atproto
 import geopandas as gpd
 import humanize
 import lxml.html
-import requests
+import httpx
 import shapely
 from dotenv import load_dotenv
 from google.cloud import monitoring_v3
@@ -34,6 +47,8 @@ IMAGE_URL = "https://gisweb.charlottesville.org/GisViewer/ParcelViewer/Details"
 BASE_PATH = pathlib.Path(__file__).parent.absolute()
 SHELF_PATH = BASE_PATH.joinpath("shelf.db")
 GIS_IMAGE_PATH = BASE_PATH.joinpath("images")
+
+BLUESKY_USERNAME = "everysale.cvilledata.org"
 
 CreateRecordResponse: TypeAlias = atproto.models.app.bsky.feed.post.CreateRecordResponse
 
@@ -249,7 +264,7 @@ def get_sales(start_date: Optional[datetime.date] = None) -> List[Dict]:
         "outFields": "*",
         "f": "json",
     }
-    response = requests.post(SALES_URL, params=params)
+    response = httpx.post(SALES_URL, params=params)
     response.raise_for_status()
     data = response.json()
     return [each["attributes"] for each in data["features"]]
@@ -271,7 +286,7 @@ def get_previous_sale(
         "outFields": "*",
         "f": "json",
     }
-    response = requests.post(SALES_URL, params=params)
+    response = httpx.post(SALES_URL, params=params)
     response.raise_for_status()
     data = response.json()
     if len(data["features"]) > 0:
@@ -291,7 +306,7 @@ def get_sales_by_page(book_page: str) -> List[Dict]:
         "outFields": "*",
         "f": "json",
     }
-    response = requests.post(SALES_URL, params=params)
+    response = httpx.post(SALES_URL, params=params)
     response.raise_for_status()
     data = response.json()
     return [feature["attributes"] for feature in data["features"]]
@@ -312,7 +327,7 @@ def get_details(parcel_number: str) -> List[Dict]:
         "outFields": "*",
         "f": "geojson",
     }
-    response = requests.get(DETAILS_URL, params=params)
+    response = httpx.get(DETAILS_URL, params=params)
     response.raise_for_status()
     data = response.json()
     return data["features"]
@@ -349,7 +364,7 @@ def get_real_estate(parcel_number: str) -> List[Dict]:
         "outFields": "*",
         "f": "json",
     }
-    response = requests.get(REAL_ESTATE_URL, params=params)
+    response = httpx.get(REAL_ESTATE_URL, params=params)
     response.raise_for_status()
     data = response.json()
     return [feature["attributes"] for feature in data["features"]]
@@ -385,12 +400,12 @@ def get_gis_photo(parcel_number: str) -> Optional[io.BytesIO]:
         "SearchOptionIndex": "0",
         "DetailsTabIndex": "0",
     }
-    details_response = requests.get(IMAGE_URL, params=params)
+    details_response = httpx.get(IMAGE_URL, params=params)
     details_response.raise_for_status()
     page = lxml.html.fromstring(details_response.content)
     urls = page.xpath('//img[contains(@src, "realestate.charlottesville.org")]/@src')
     if urls:
-        image_response = requests.get(urls[0])  # type: ignore
+        image_response = httpx.get(urls[0])  # type: ignore
         if image_response.status_code != 200:
             return None
         try:
@@ -454,10 +469,14 @@ def send_metric(client, metric, labels, value, project_id="cvilledata"):
 if __name__ == "__main__":
     load_dotenv()
     bsky_client = atproto.Client()
-    bsky_client.login("everysalecville.bsky.social", os.getenv("BLUESKY_PASSWORD"))
+    bsky_client.login(BLUESKY_USERNAME, os.getenv("BLUESKY_PASSWORD"))
     overlay_classifier = OverlayClassifier()
     metrics_client = monitoring_v3.MetricServiceClient()
-    start_date = datetime.date.today() - datetime.timedelta(days=14)
+
+    # The data portal stops listing sales for about a month at the start of the
+    # year. Choose a long lookback interval so we don't miss sales when the
+    # feed resumes.
+    start_date = datetime.date.today() - datetime.timedelta(days=60)
 
     try:
         with shelve.open(str(SHELF_PATH)) as shelf:
