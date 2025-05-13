@@ -416,7 +416,7 @@ def get_gis_photo(parcel_number: str) -> Optional[io.BytesIO]:
         return None
 
 
-MAX_IMAGE_SIZE_BYTES = 2**20
+MAX_IMAGE_SIZE_BYTES = 1_000_000
 
 
 class ImageTooLarge(Exception):
