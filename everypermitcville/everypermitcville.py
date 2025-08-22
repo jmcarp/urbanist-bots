@@ -46,7 +46,7 @@ HEADERS = {"User-Agent": "everypermitcville.bsky.social"}
 BASE_PATH = pathlib.Path(__file__).parent.absolute()
 SHELF_PATH = BASE_PATH.joinpath("shelf.db")
 
-LOOKBACK_DAYS = 7
+LOOKBACK_DAYS = 30
 MAX_POST_LENGTH = 300
 MAX_MAX_DETAILS = 5
 MAX_DETAILS_LENGTH = 50
@@ -64,7 +64,7 @@ class Post:
 
 
 def list_proxies() -> List[Dict]:
-    resp = httpx.get("https://www.sslproxies.org")
+    resp = httpx.get("https://free-proxy-list.net/")
     resp.raise_for_status()
     doc = lxml.html.fromstring(resp.content)
 
@@ -100,9 +100,9 @@ def login(client: httpx.Client, username: str, password: str) -> None:
             "Password": password,
         },
     )
-    assert (
-        resp.status_code == 302
-    ), f"Got unexpected status code {resp.status_code} from login"
+    assert resp.status_code == 302, (
+        f"Got unexpected status code {resp.status_code} from login"
+    )
 
 
 def get_permits(
@@ -150,17 +150,20 @@ def get_permit(client: httpx.Client, permit_id: str) -> Tuple[str, dict, dict]:
         parts = [part.strip() for part in parts]
         info[parts[0]] = parts[1]
 
+    details = {}
     detail_table = doc.xpath(
         "//h5[contains(text(), 'Permit/License Details')]/parent::div//table"
     )
-    detail_headings = detail_table[0].xpath("./thead/tr/th/text()")
-    detail_rows = detail_table[0].xpath("./tbody/tr")
-    details = {}
-    for row in detail_rows:
-        detail = dict(
-            zip(detail_headings, [each.strip() for each in row.xpath("./td/text()")])
-        )
-        details[detail["Description"]] = detail["Data"]
+    if len(detail_table) > 0:
+        detail_headings = detail_table[0].xpath("./thead/tr/th/text()")
+        detail_rows = detail_table[0].xpath("./tbody/tr")
+        for row in detail_rows:
+            detail = dict(
+                zip(
+                    detail_headings, [each.strip() for each in row.xpath("./td/text()")]
+                )
+            )
+            details[detail["Description"]] = detail["Data"]
 
     return str(resp.url), info, details
 
@@ -247,14 +250,18 @@ def format_message(
 if __name__ == "__main__":
     dotenv.load_dotenv()
 
-    # The permit portal only accepts requests from US addresses, and appears to
-    # block VPS services like the one that hosts this application. Route
-    # requests through a US-based proxy.
     def check_proxy(client: httpx.Client) -> None:
         login(client, os.getenv("PERMIT_USERNAME"), os.getenv("PERMIT_PASSWORD"))
 
-    proxy_addr = choose_proxy(list_proxies(), check_proxy)
-    http_client = httpx.Client(timeout=30, proxy=proxy_addr)
+    # The permit portal only accepts requests from US addresses, and appears to
+    # block VPS services like the one that hosts this application. If
+    # requested, route requests through a US-based proxy.
+    if os.getenv("USE_PROXY", "") != "":
+        proxy_addr = choose_proxy(list_proxies(), check_proxy)
+        http_client = httpx.Client(timeout=60, proxy=proxy_addr)
+    else:
+        http_client = httpx.Client(timeout=60)
+
     login(http_client, os.getenv("PERMIT_USERNAME"), os.getenv("PERMIT_PASSWORD"))
 
     bsky_client = atproto.Client()
