@@ -3,6 +3,7 @@ import io
 import os
 import pathlib
 import sqlite3
+import sys
 from typing import Dict, List, Optional, Tuple
 
 import atproto
@@ -22,6 +23,10 @@ IMAGE_URL = "https://gisweb.charlottesville.org/GisViewer/ParcelViewer/Details"
 BASE_PATH = pathlib.Path(__file__).parent.absolute()
 SQLITE_PATH = BASE_PATH.joinpath("everylot.db")
 GIS_IMAGE_PATH = BASE_PATH.joinpath("images")
+
+
+class NotFound(Exception):
+    pass
 
 
 class OverlayClassifier:
@@ -80,7 +85,15 @@ def main(
     parcel = next_parcel(conn)
     parcel_number = parcel["ParcelNumber"]
 
-    status, address = get_status(parcel, overlay_classifier)
+    try:
+        status, address = get_status(parcel, overlay_classifier)
+    except NotFound:
+        conn.execute(
+            "update parcels set posted = true where ParcelNumber = ?",
+            (parcel_number,),
+        )
+        conn.commit()
+        raise
 
     images, image_alts = [], []
     photo_image = get_gis_photo(parcel_number)
@@ -122,6 +135,8 @@ def get_status(parcel: Dict, overlay_classifier: OverlayClassifier) -> Tuple[str
     parcel_number = parcel["ParcelNumber"]
 
     detailses = get_details(parcel_number)
+    if len(detailses) == 0:
+        raise NotFound
     assert len(detailses) == 1, f"Expected 1 detail record; got {len(detailses)}"
 
     details = detailses[0]
@@ -353,4 +368,11 @@ if __name__ == "__main__":
 
     overlay_classifier = OverlayClassifier()
 
-    main(conn, bsky_client, overlay_classifier)
+    # Loop until we find a legitimate parcel.
+    while True:
+        try:
+            main(conn, bsky_client, overlay_classifier)
+            httpx.get(os.environ["HEALTHCHECK_ENDPOINT"])
+            sys.exit(0)
+        except NotFound:
+            pass

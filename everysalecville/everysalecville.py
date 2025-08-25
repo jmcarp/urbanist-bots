@@ -4,7 +4,6 @@
 # dependencies = [
 #     "atproto",
 #     "geopandas",
-#     "google-cloud-monitoring",
 #     "httpx",
 #     "humanize",
 #     "lxml",
@@ -33,7 +32,6 @@ import lxml.html
 import httpx
 import shapely
 from dotenv import load_dotenv
-from google.cloud import monitoring_v3
 from PIL import Image
 
 logging.basicConfig(level=logging.INFO)
@@ -444,60 +442,14 @@ def maybe_compress_image(
     raise ImageTooLarge()
 
 
-def send_metric(client, metric, labels, value, project_id="cvilledata"):
-    if not os.getenv("SEND_CLOUD_METRICS"):
-        return
-    project_name = f"projects/{project_id}"
-
-    series = monitoring_v3.TimeSeries()
-    series.metric.type = f"custom.googleapis.com/{metric}"
-    series.metric.labels.update(labels)
-
-    now = time.time()
-    seconds = int(now)
-    nanos = int((now - seconds) * 10**9)
-
-    interval = monitoring_v3.TimeInterval(
-        {"end_time": {"seconds": seconds, "nanos": nanos}}
-    )
-    point = monitoring_v3.Point({"interval": interval, "value": value})
-    series.points = [point]
-
-    client.create_time_series(name=project_name, time_series=[series])
-
-
 if __name__ == "__main__":
     load_dotenv()
     bsky_client = atproto.Client()
     bsky_client.login(BLUESKY_USERNAME, os.getenv("BLUESKY_PASSWORD"))
     overlay_classifier = OverlayClassifier()
-    metrics_client = monitoring_v3.MetricServiceClient()
-
-    # The data portal stops listing sales for about a month at the start of the
-    # year. Choose a long lookback interval so we don't miss sales when the
-    # feed resumes.
     start_date = datetime.date.today() - datetime.timedelta(days=60)
 
-    try:
-        with shelve.open(str(SHELF_PATH)) as shelf:
-            post_count = main(shelf, bsky_client, overlay_classifier, start_date)
-        send_metric(
-            metrics_client,
-            "bot_status",
-            {"bot": "everysalecville", "status": "success"},
-            {"int64_value": 1},
-        )
-        send_metric(
-            metrics_client,
-            "bot_post_count",
-            {"bot": "everysalecville"},
-            {"int64_value": post_count},
-        )
-    except Exception as exc:
-        logger.error(exc)
-        send_metric(
-            metrics_client,
-            "bot_status",
-            {"bot": "everysalecville", "status": "error"},
-            {"int64_value": 1},
-        )
+    with shelve.open(str(SHELF_PATH)) as shelf:
+        post_count = main(shelf, bsky_client, overlay_classifier, start_date)
+
+    httpx.get(os.environ["HEALTHCHECK_ENDPOINT"])

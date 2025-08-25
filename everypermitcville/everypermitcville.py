@@ -269,3 +269,5 @@ if __name__ == "__main__":
 
     with shelve.open(str(SHELF_PATH)) as shelf:
         main(http_client, bsky_client, shelf)
+
+    httpx.get(os.environ["HEALTHCHECK_ENDPOINT"])
